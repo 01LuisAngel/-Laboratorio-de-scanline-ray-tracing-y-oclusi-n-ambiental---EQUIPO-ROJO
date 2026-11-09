@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Integrante 4: medición y comparativa</title>
+  <style>
+    body { background:#0E1220; color:#A8B896; font-family:sans-serif; margin:20px; }
+    select, input, button { background:#1c2a30; color:#A8B896; border:1px solid #5E8A8A; padding:6px 10px; margin-right:6px; }
+    button { cursor:pointer; background:#3E5A5A; }
+    canvas { display:block; margin:16px 0; border:2px solid #3E5A5A; background:#0E1220; }
+    table { border-collapse:collapse; }
+    th, td { border:1px solid #3E5A5A; padding:6px 14px; text-align:left; }
+    th { background:#1c2a30; }
+    .nota { color:#8aa; font-size:13px; max-width:720px; }
+  </style>
+</head>
+<body>
+  <h2>Integrante 4: medición y comparativa</h2>
+  <p class="nota">Tu parte es medicion.js (selector, performance.now() y tabla). Para comparar necesita todos los renderizadores, que se incluyen como dependencias solo para poder probar.</p>
+
+  <label>Técnica:
+    <select id="tecnica">
+      <option value="scanline">Scanline</option>
+      <option value="raytracing">Ray tracing</option>
+      <option value="raytracing_aa">Ray tracing + Anti-aliasing</option>
+      <option value="ao">Oclusión ambiental</option>
+    </select>
+  </label>
+  <label>Resolución:
+    <select id="res">
+      <option value="200">200×200</option>
+      <option value="400" selected>400×400</option>
+      <option value="600">600×600</option>
+    </select>
+  </label>
+  <label>Muestras AO:
+    <input id="samples" type="number" value="16" min="1" max="128" style="width:70px">
+  </label>
+  <button id="go">Renderizar</button>
+
+  <canvas id="c" width="400" height="400"></canvas>
+
+  <table id="tabla">
+    <thead><tr><th>Técnica</th><th>Resolución</th><th>Tiempo (ms)</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+/* ============================================================
+   DEPENDENCIA de Integrante 1 (solo para poder probar; NO lo subas en tu rama)
+   ============================================================ */
+// --- scene.js ---
+// scene.js  (INTEGRANTE 1 - líder)
+// Escena base + helpers matemáticos compartidos por todas las técnicas.
+// Paleta: salvia, verde azulado, gris verdoso, azul casi negro.
+
+const SCENE = {
+  camera: { pos: [0, 1, -4], fov: 60 },
+  light:  { pos: [5, 8, -3] },
+  spheres: [
+    { c: [0, 1, 0],       r: 1,   color: [168, 184, 150] },   // salvia
+    { c: [2.2, 0.6, 1],   r: 0.6, color: [94, 138, 138]  },   // verde azulado
+    { c: [-2, 0.5, 0.5],  r: 0.5, color: [232, 192, 32]  },   // acento amarillo
+  ],
+  plane: { y: 0, color: [62, 90, 90] },
+  bg: [14, 18, 32],
+};
+
+// Cada técnica se registra aquí: RENDERERS.nombre = function (ctx, W, H, opts) {...}
+const RENDERERS = {};
+
+// ---- Helpers compartidos (NO volver a declararlos en otros archivos) ----
+const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const mul = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];
+const normalize = a => { const l = Math.hypot(a[0], a[1], a[2]); return [a[0] / l, a[1] / l, a[2] / l]; };
+  </script>
+
+  <script>
+/* ============================================================
+   DEPENDENCIA de Integrante 1 (solo para poder probar; NO lo subas en tu rama)
+   ============================================================ */
+// --- scanline.js ---
+// scanline.js  (INTEGRANTE 1 - líder)
+// Rasterización de triángulos con z-buffer y sombreado plano.
+
+RENDERERS.scanline = function (ctx, W, H) {
+  const img = ctx.createImageData(W, H);
+  const zbuf = new Float32Array(W * H).fill(Infinity);
+  for (let i = 0; i < W * H; i++) img.data.set([SCENE.bg[0], SCENE.bg[1], SCENE.bg[2], 255], i * 4);
+  for (const t of buildTriangles()) rasterize(t, img, zbuf, W, H);
+  ctx.putImageData(img, 0, 0);
+};
+
+function makeTri(verts, color, center) {
+  let n = normalize(cross(sub(verts[1], verts[0]), sub(verts[2], verts[0])));
+  if (center && dot(n, sub(verts[0], center)) < 0) n = mul(n, -1); // normal hacia afuera
+  return { verts, color, normal: n };
+}
+
+function buildTriangles() {
+  const tris = [];
+  const P = SCENE.plane;
+  const q = [[-10, P.y, -3], [10, P.y, -3], [10, P.y, 25], [-10, P.y, 25]];
+  tris.push({ verts: [q[0], q[2], q[1]], color: P.color, normal: [0, 1, 0] });
+  tris.push({ verts: [q[0], q[3], q[2]], color: P.color, normal: [0, 1, 0] });
+
+  const A = 24, B = 16; // segmentos de la esfera UV
+  for (const s of SCENE.spheres) {
+    const pt = (i, j) => {
+      const th = Math.PI * j / B, ph = 2 * Math.PI * i / A;
+      return [
+        s.c[0] + s.r * Math.sin(th) * Math.cos(ph),
+        s.c[1] + s.r * Math.cos(th),
+        s.c[2] + s.r * Math.sin(th) * Math.sin(ph),
+      ];
+    };
+    for (let j = 0; j < B; j++) for (let i = 0; i < A; i++) {
+      const a = pt(i, j), b = pt(i + 1, j), c = pt(i + 1, j + 1), d = pt(i, j + 1);
+      tris.push(makeTri([a, b, c], s.color, s.c));
+      tris.push(makeTri([a, c, d], s.color, s.c));
+    }
+  }
+  return tris;
+}
+
+// Devuelve [x_pantalla, y_pantalla, z_cámara]
+function project(v, W, H) {
+  const f = 1 / Math.tan((SCENE.camera.fov * Math.PI / 180) / 2);
+  const x = v[0] - SCENE.camera.pos[0];
+  const y = v[1] - SCENE.camera.pos[1];
+  const z = v[2] - SCENE.camera.pos[2];
+  return [(x * f / z * 0.5 + 0.5) * W, (0.5 - y * f / z * 0.5) * H, z];
+}
+
+const edge = (a, b, c) => (c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0]);
+
+function rasterize(t, img, zbuf, W, H) {
+  const p = t.verts.map(v => project(v, W, H));
+  if (p[0][2] <= 0 || p[1][2] <= 0 || p[2][2] <= 0) return; // detrás de la cámara
+  const area = edge(p[0], p[1], p[2]);
+  if (area === 0) return; // triángulo degenerado (polos de la esfera)
+
+  const minX = Math.max(0, Math.floor(Math.min(p[0][0], p[1][0], p[2][0])));
+  const maxX = Math.min(W - 1, Math.ceil(Math.max(p[0][0], p[1][0], p[2][0])));
+  const minY = Math.max(0, Math.floor(Math.min(p[0][1], p[1][1], p[2][1])));
+  const maxY = Math.min(H - 1, Math.ceil(Math.max(p[0][1], p[1][1], p[2][1])));
+
+  // Sombreado plano: un solo valor de luz por triángulo
+  const L = Math.max(0.15, dot(t.normal, normalize(sub(SCENE.light.pos, t.verts[0]))));
+  const r = t.color[0] * L, g = t.color[1] * L, b = t.color[2] * L;
+
+  for (let y = minY; y <= maxY; y++) for (let x = minX; x <= maxX; x++) {
+    const q = [x + 0.5, y + 0.5];
+    const w0 = edge(p[1], p[2], q) / area;
+    const w1 = edge(p[2], p[0], q) / area;
+    const w2 = edge(p[0], p[1], q) / area;
+    if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+
+    // Profundidad correcta en perspectiva: se interpola 1/z
+    const invz = w0 / p[0][2] + w1 / p[1][2] + w2 / p[2][2];
+    const z = 1 / invz;
+    const idx = y * W + x;
+    if (z >= zbuf[idx]) continue; // z-buffer
+    zbuf[idx] = z;
+    img.data.set([r, g, b, 255], idx * 4);
+  }
+}
+  </script>
+
+  <script>
+/* ============================================================
+   DEPENDENCIA de Integrante 2 (solo para poder probar; NO lo subas en tu rama)
+   ============================================================ */
+// --- raytracing.js ---
+// raytracing.js  (INTEGRANTE 2)
+// Rayos primarios, intersección con esferas y plano, sombras y un reflejo.
+
+RENDERERS.raytracing = function (ctx, W, H) {
+  const img = ctx.createImageData(W, H);
+  const f = Math.tan((SCENE.camera.fov * Math.PI / 180) / 2);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const dir = normalize([(2 * (x + 0.5) / W - 1) * f, (1 - 2 * (y + 0.5) / H) * f, 1]);
+    const c = trace(SCENE.camera.pos, dir, 1);
+    img.data.set([c[0], c[1], c[2], 255], (y * W + x) * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+};
+
+// Devuelve el impacto más cercano {t, p, n, color, refl} o null
+function intersect(o, d) {
+  let best = null, tBest = Infinity;
+
+  for (const s of SCENE.spheres) {
+    const oc = sub(o, s.c);
+    const b = dot(oc, d);
+    const c = dot(oc, oc) - s.r * s.r;
+    const disc = b * b - c;
+    if (disc > 0) {
+      const t = -b - Math.sqrt(disc);
+      if (t > 1e-3 && t < tBest) {
+        const p = add(o, mul(d, t));
+        tBest = t;
+        best = { t, p, n: normalize(sub(p, s.c)), color: s.color, refl: 0.3 };
+      }
+    }
+  }
+
+  if (Math.abs(d[1]) > 1e-6) { // plano horizontal
+    const t = (SCENE.plane.y - o[1]) / d[1];
+    if (t > 1e-3 && t < tBest) {
+      tBest = t;
+      best = { t, p: add(o, mul(d, t)), n: [0, 1, 0], color: SCENE.plane.color, refl: 0.2 };
+    }
+  }
+  return best;
+}
+
+function trace(o, d, depth) {
+  const h = intersect(o, d);
+  if (!h) return SCENE.bg;
+
+  const toL = normalize(sub(SCENE.light.pos, h.p));
+  const shadow = intersect(add(h.p, mul(h.n, 1e-3)), toL); // rayo de sombra
+  const diff = shadow ? 0.15 : Math.max(0.15, dot(h.n, toL));
+  let col = h.color.map(c => c * diff);
+
+  if (depth > 0) { // reflejo
+    const r = sub(d, mul(h.n, 2 * dot(d, h.n)));
+    const rc = trace(add(h.p, mul(h.n, 1e-3)), r, depth - 1);
+    col = col.map((c, i) => c * (1 - h.refl) + rc[i] * h.refl);
+  }
+  return col;
+}
+  </script>
+
+  <script>
+/* ============================================================
+   DEPENDENCIA de Integrante 3 (solo para poder probar; NO lo subas en tu rama)
+   ============================================================ */
+// --- ao.js ---
+// ao.js  (INTEGRANTE 3)
+// Oclusión ambiental: se lanzan N rayos en el hemisferio de cada punto.
+// El color se multiplica por la fracción de rayos que NO chocan cerca.
+
+const AO_RADIUS = 1.5; // distancia máxima a la que algo cuenta como oclusión
+
+RENDERERS.ao = function (ctx, W, H, opts) {
+  const N = (opts && opts.samples) || 16;
+  const img = ctx.createImageData(W, H);
+  const f = Math.tan((SCENE.camera.fov * Math.PI / 180) / 2);
+
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const dir = normalize([(2 * (x + 0.5) / W - 1) * f, (1 - 2 * (y + 0.5) / H) * f, 1]);
+    const h = intersect(SCENE.camera.pos, dir);
+    let col = SCENE.bg;
+
+    if (h) {
+      const origin = add(h.p, mul(h.n, 1e-3));
+      let libres = 0;
+      for (let i = 0; i < N; i++) {
+        const hit = intersect(origin, randomHemisphere(h.n));
+        if (!hit || hit.t > AO_RADIUS) libres++;
+      }
+      const ao = libres / N;
+      col = h.color.map(c => c * ao);
+    }
+    img.data.set([col[0], col[1], col[2], 255], (y * W + x) * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+};
+
+// Dirección aleatoria en el hemisferio alrededor de la normal n
+function randomHemisphere(n) {
+  while (true) {
+    const v = [Math.random() * 2 - 1, Math.random() * 2 - 1, Math.random() * 2 - 1];
+    const l2 = dot(v, v);
+    if (l2 <= 1 && l2 > 1e-4) {
+      const u = normalize(v);
+      return dot(u, n) < 0 ? mul(u, -1) : u;
+    }
+  }
+}
+  </script>
+
+  <script>
+/* ============================================================
+   DEPENDENCIA de Integrante 5 (solo para poder probar; NO lo subas en tu rama)
+   ============================================================ */
+// --- antialiasing.js ---
+// antialiasing.js  (INTEGRANTE 5)
+// Supersampling NxN sobre el ray tracing: promedia varios rayos por píxel.
+// Reutiliza trace() de raytracing.js, así que no hay conflictos de Git.
+
+RENDERERS.raytracing_aa = function (ctx, W, H, opts) {
+  const n = (opts && opts.aa) || 2; // 2 => 4 rayos por píxel, 3 => 9
+  const img = ctx.createImageData(W, H);
+  const f = Math.tan((SCENE.camera.fov * Math.PI / 180) / 2);
+
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let r = 0, g = 0, b = 0;
+    for (let sy = 0; sy < n; sy++) for (let sx = 0; sx < n; sx++) {
+      const u = (x + (sx + 0.5) / n) / W; // subpíxel dentro del píxel
+      const v = (y + (sy + 0.5) / n) / H;
+      const dir = normalize([(2 * u - 1) * f, (1 - 2 * v) * f, 1]);
+      const c = trace(SCENE.camera.pos, dir, 1);
+      r += c[0]; g += c[1]; b += c[2];
+    }
+    const k = n * n;
+    img.data.set([r / k, g / k, b / k, 255], (y * W + x) * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+};
+
+// Alternativa para equipos de 5 que prefieran el "segundo rebote de luz":
+// descomenten esto y agreguen <option value="raytracing_2rebotes"> en index.html
+// RENDERERS.raytracing_2rebotes = function (ctx, W, H) {
+//   const img = ctx.createImageData(W, H);
+//   const f = Math.tan((SCENE.camera.fov * Math.PI / 180) / 2);
+//   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+//     const dir = normalize([(2 * (x + 0.5) / W - 1) * f, (1 - 2 * (y + 0.5) / H) * f, 1]);
+//     const c = trace(SCENE.camera.pos, dir, 2);
+//     img.data.set([c[0], c[1], c[2], 255], (y * W + x) * 4);
+//   }
+//   ctx.putImageData(img, 0, 0);
+// };
+  </script>
+
+  <script>
+/* ============================================================
+   ESTA ES TU PARTE (Integrante 4)
+   ============================================================ */
+// --- medicion.js ---
+// medicion.js  (INTEGRANTE 4)
+// Selector de técnica y resolución, medición con performance.now() y tabla en pantalla.
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+document.getElementById('go').onclick = () => {
+  const tec = document.getElementById('tecnica').value;
+  const res = parseInt(document.getElementById('res').value, 10);
+  const samples = parseInt(document.getElementById('samples').value, 10);
+  const btn = document.getElementById('go');
+
+  canvas.width = canvas.height = res;
+  btn.disabled = true;
+  btn.textContent = 'Renderizando...';
+
+  // setTimeout deja que el navegador pinte el texto del botón antes de bloquearse
+  setTimeout(() => {
+    const t0 = performance.now();
+    RENDERERS[tec](ctx, res, res, { samples, aa: 2 });
+    const ms = (performance.now() - t0).toFixed(1);
+
+    const fila = document.createElement('tr');
+    const extra = tec === 'ao' ? ` (${samples} muestras)` : '';
+    fila.innerHTML = `<td>${tec}${extra}</td><td>${res}×${res}</td><td>${ms}</td>`;
+    document.querySelector('#tabla tbody').appendChild(fila);
+
+    btn.disabled = false;
+    btn.textContent = 'Renderizar';
+  }, 30);
+};
+  </script>
+
+
+</body>
+</html>
