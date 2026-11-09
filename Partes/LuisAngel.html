@@ -1,0 +1,107 @@
+<!DOCTYPE html> 
+
+<html lang="es"> 
+
+<head> 
+
+  <meta charset="utf-8"> 
+
+  <title>Lab de Render</title> 
+
+  <style> 
+
+    body { background:#0E1220; color:#A8B896; font-family:sans-serif; margin:20px; } 
+
+    select, input, button { background:#1c2a30; color:#A8B896; border:1px solid #5E8A8A; padding:6px 10px; margin-right:6px; } 
+
+    button { cursor:pointer; background:#3E5A5A; } 
+
+    canvas { display:block; margin:16px 0; border:2px solid #3E5A5A; background:#0E1220; } 
+
+    table { border-collapse:collapse; } 
+
+    th, td { border:1px solid #3E5A5A; padding:6px 14px; text-align:left; } 
+
+    th { background:#1c2a30; } 
+
+  </style> 
+
+</head> 
+
+<body> 
+
+  <h2>Lab de Render: scanline, ray tracing y oclusión ambiental</h2> 
+
+ 
+
+  <label>Técnica: 
+
+    <select id="tecnica"> 
+
+      <option value="scanline">Scanline</option> 
+
+      <option value="raytracing">Ray tracing</option> 
+
+      <option value="raytracing_aa">Ray tracing + Anti-aliasing</option> 
+
+      <option value="ao">Oclusión ambiental</option> 
+
+    </select> 
+
+  </label> 
+
+  <label>Resolución: 
+
+    <select id="res"> 
+
+      <option value="200">200×200</option> 
+
+      <option value="400" selected>400×400</option> 
+
+      <option value="600">600×600</option> 
+
+    </select> 
+
+  </label> 
+
+  <label>Muestras AO: 
+
+    <input id="samples" type="number" value="16" min="1" max="128" style="width:70px"> 
+
+  </label> 
+
+  <button id="go">Renderizar</button> 
+
+ 
+
+  <canvas id="c" width="400" height="400"></canvas> 
+
+ 
+
+  <table id="tabla"> 
+
+    <thead><tr><th>Técnica</th><th>Resolución</th><th>Tiempo (ms)</th></tr></thead> 
+
+    <tbody></tbody> 
+
+  </table> 
+
+ 
+
+  <!-- Orden importante: scene.js primero --> 
+
+  <script src="scene.js"></script> 
+
+  <script src="scanline.js"></script> 
+
+  <script src="raytracing.js"></script> 
+
+  <script src="ao.js"></script> 
+
+  <script src="antialiasing.js"></script> 
+
+  <script src="medicion.js"></script> 
+
+</body> 
+
+</html> 
