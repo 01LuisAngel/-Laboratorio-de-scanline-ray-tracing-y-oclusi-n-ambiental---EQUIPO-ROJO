@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Integrante 2: ray tracing del diario</title>
+  <style>
+    /* Colores cálidos, a juego con el cuero y el papel del diario */
+    body { background:#1a1410; color:#b8a384; font-family:Georgia, serif; margin:20px; }
+    h2 { margin:0 0 6px; }
+    .panel { display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center; margin:10px 0; }
+    select, input[type=number], button { background:#2a2018; color:#d8c6a0; border:1px solid #7a6140; padding:6px 10px; border-radius:4px; font-family:inherit; }
+    input[type=range] { accent-color:#a8843a; vertical-align:middle; }
+    button { cursor:pointer; background:#6b4423; }
+    button:hover { background:#8a5a2e; }
+    canvas { display:block; margin:16px 0; border:2px solid #4a3320; background:#1a1410; border-radius:6px; box-shadow:0 0 28px rgba(255,200,120,.12); }
+    table { border-collapse:collapse; }
+    th, td { border:1px solid #4a3320; padding:6px 14px; text-align:left; }
+    th { background:#2a2018; }
+    .nota { color:#9a8668; font-size:13px; max-width:760px; }
+  </style>
+</head>
+<body>
+  <h2>Integrante 2: ray tracing del diario antiguo</h2>
+  <p class="nota">Tu parte es raytracing.js: rayos primarios, intersección rayo-caja con el diario girado en 3D, texturas procedurales (cuero, papel, madera, latón), sombras suaves, reflejos con rebotes configurables, Fresnel y anti-aliasing por supersampling. scene.js es del líder y se incluye solo para poder probar.</p>
+
+  <!-- Controles del renderizado -->
+  <div class="panel">
+    <label>Técnica:
+      <select id="tecnica"><option value="raytracing">Ray tracing</option></select>
+    </label>
+    <label>Resolución:
+      <select id="res">
+        <option value="200">200×200</option>
+        <option value="400" selected>400×400</option>
+        <option value="600">600×600</option>
+      </select>
+    </label>
+    <label>Anti-aliasing:
+      <select id="aa">
+        <option value="1">Sin AA (1×1)</option>
+        <option value="2" selected>2×2</option>
+        <option value="3">3×3</option>
+        <option value="4">4×4</option>
+      </select>
+    </label>
+    <label>Rebotes:
+      <select id="bounces">
+        <option value="0">0 (sin reflejos)</option>
+        <option value="1">1 rebote</option>
+        <option value="2" selected>2 rebotes</option>
+        <option value="3">3 rebotes</option>
+      </select>
+    </label>
+    <label>Rayos de sombra:
+      <select id="sombras">
+        <option value="1">1 (sombra dura)</option>
+        <option value="6" selected>6 (sombra suave)</option>
+        <option value="12">12 (más suave)</option>
+      </select>
+    </label>
+    <label>Muestras AO:
+      <input id="samples" type="number" value="16" min="1" max="128" style="width:70px">
+    </label>
+  </div>
+
+  <!-- Giro del diario en los tres ejes, como en la versión de three.js -->
+  <div class="panel">
+    <label>Giro X <input id="rx" type="range" min="-180" max="180" value="14"> <span id="vrx">14°</span></label>
+    <label>Giro Y <input id="ry" type="range" min="-180" max="180" value="-29"> <span id="vry">-29°</span></label>
+    <label>Giro Z <input id="rz" type="range" min="-180" max="180" value="0"> <span id="vrz">0°</span></label>
+    <button id="go">Renderizar</button>
+    <button id="png">Descargar PNG</button>
+  </div>
+
+  <canvas id="c" width="400" height="400"></canvas>
+
+  <table id="tabla">
+    <thead><tr><th>Técnica</th><th>Configuración</th><th>Resolución</th><th>Tiempo (ms)</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+/* ============================================================
+   DEPENDENCIA de Integrante 1 (solo para poder probar; NO lo subas en tu rama)
+   ============================================================ */
+// --- scene.js ---
+// scene.js  (INTEGRANTE 1 - líder)
+// Escena base + helpers matemáticos compartidos por todas las técnicas.
+// Ahora la escena es el diario antiguo (la misma figura de la versión en three.js).
+
+// Materiales: color base [R,G,B], reflectividad (refl), dureza del brillo (shin),
+// intensidad del brillo (ks), si es metal (tiñe el reflejo) y qué textura procedural usa.
+const MATERIALES = {
+  cuero:        { color: [107, 68, 35],  refl: 0.05, shin: 14, ks: 0.14, tex: 'cuero'   },
+  cueroOscuro:  { color: [63, 40, 20],   refl: 0.04, shin: 10, ks: 0.10, tex: 'cuero'   },
+  correa:       { color: [58, 36, 18],   refl: 0.05, shin: 16, ks: 0.18, tex: 'cuero'   },
+  laton:        { color: [200, 160, 70], refl: 0.60, shin: 90, ks: 1.00, tex: 'laton', metal: true },
+  paginas:      { color: [217, 197, 147], refl: 0.0, shin: 4,  ks: 0.02, tex: 'paginas' },
+  etiqueta:     { color: [227, 211, 166], refl: 0.0, shin: 6,  ks: 0.04, tex: 'etiqueta' },
+  tela:         { color: [122, 28, 34],  refl: 0.02, shin: 6,  ks: 0.04, tex: 'tela'    },
+};
+
+const SCENE = {
+  // Cámara con "mirar a": posición, punto al que apunta y campo de visión (grados)
+  camera: { pos: [0.3, 2.35, 5.7], target: [0, 1.5, 0], fov: 42 },
+
+  // Lámpara cálida de escritorio (luz puntual con tamaño, para sombras suaves)
+  light: { pos: [2.5, 5.8, 3.2], color: [255, 217, 160], intensity: 1.45, radius: 0.55 },
+
+  // Luz de relleno desde atrás (direccional, sin sombra): marca los bordes del diario
+  fill: { dir: [-3, 3, -2], color: [255, 255, 255], k: 0.28 },
+
+  // Luz ambiente cálida para que las sombras no queden totalmente negras
+  ambient: { color: [154, 133, 112], k: 0.55 },
+
+  // Mesa de madera (plano horizontal) sobre la que "flota" el diario
+  mesa: { y: 0 },
+
+  // Diario: posición, giro (radianes, orden XYZ como three.js) y lista de cajas.
+  // Cada caja: c = centro, s = tamaño (ancho, alto, grosor), m = material
+  diario: {
+    pos: [0, 1.55, 0],
+    rot: [0.25, -0.5, 0],
+    cajas: [
+      // Tapas (frente y atrás)
+      { c: [0.02, 0, 0.21],  s: [1.7, 2.3, 0.08], m: 'cuero' },
+      { c: [0.02, 0, -0.21], s: [1.7, 2.3, 0.08], m: 'cuero' },
+      // Lomo y nervios del lomo
+      { c: [-0.82, 0, 0],    s: [0.12, 2.3, 0.5],  m: 'cueroOscuro' },
+      { c: [-0.83, -0.85, 0], s: [0.15, 0.07, 0.54], m: 'cueroOscuro' },
+      { c: [-0.83, -0.3, 0],  s: [0.15, 0.07, 0.54], m: 'cueroOscuro' },
+      { c: [-0.83, 0.3, 0],   s: [0.15, 0.07, 0.54], m: 'cueroOscuro' },
+      { c: [-0.83, 0.85, 0],  s: [0.15, 0.07, 0.54], m: 'cueroOscuro' },
+      // Bloque de páginas
+      { c: [0.04, 0, 0],     s: [1.55, 2.15, 0.34], m: 'paginas' },
+      // Marco de costura en la portada (cuatro tiras finas)
+      { c: [0.05, 0.9, 0.255],  s: [1.35, 0.03, 0.01], m: 'cueroOscuro' },
+      { c: [0.05, -0.9, 0.255], s: [1.35, 0.03, 0.01], m: 'cueroOscuro' },
+      { c: [0.69, 0, 0.255],    s: [0.03, 1.83, 0.01], m: 'cueroOscuro' },
+      { c: [-0.59, 0, 0.255],   s: [0.03, 1.83, 0.01], m: 'cueroOscuro' },
+      // Etiqueta de papel (una caja muy delgada con textura)
+      { c: [0.05, 0.45, 0.262], s: [0.85, 0.53, 0.004], m: 'etiqueta' },
+      // Correa: frente, borde y lengüeta de atrás
+      { c: [0.42, -0.35, 0.265], s: [0.95, 0.2, 0.025], m: 'correa' },
+      { c: [0.89, -0.35, 0],     s: [0.03, 0.2, 0.55],  m: 'correa' },
+      { c: [0.68, -0.35, -0.265], s: [0.4, 0.2, 0.025], m: 'correa' },
+      // Hebilla de latón
+      { c: [-0.02, -0.35, 0.28],  s: [0.18, 0.28, 0.03],  m: 'laton' },
+      { c: [-0.02, -0.35, 0.285], s: [0.1, 0.19, 0.035],  m: 'correa' },
+      { c: [-0.02, -0.35, 0.3],   s: [0.2, 0.025, 0.03],  m: 'laton' },
+      // Marcapáginas de tela que asoma por abajo
+      { c: [0.3, -1.3, 0], s: [0.09, 0.45, 0.012], m: 'tela' },
+    ],
+  },
+
+  bg: [20, 15, 12],   // color del cielo arriba (casi negro cálido)
+};
+
+// Cada técnica se registra aquí: RENDERERS.nombre = function (ctx, W, H, opts) {...}
+const RENDERERS = {};
+
+// ---- Helpers compartidos (NO volver a declararlos en otros archivos) ----
+const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const mul = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];
+const normalize = a => { const l = Math.hypot(a[0], a[1], a[2]); return [a[0] / l, a[1] / l, a[2] / l]; };
+
+// Matrices 3x3 (arreglo de 3 filas) para girar el diario
+const matVec = (M, v) => [dot(M[0], v), dot(M[1], v), dot(M[2], v)];
+const matTrans = M => [[M[0][0], M[1][0], M[2][0]], [M[0][1], M[1][1], M[2][1]], [M[0][2], M[1][2], M[2][2]]];
+const matMul = (A, B) => A.map(fila => [0, 1, 2].map(j => fila[0] * B[0][j] + fila[1] * B[1][j] + fila[2] * B[2][j]));
+// Matriz de giro con ángulos de Euler en orden XYZ (igual que three.js): R = Rx * Ry * Rz
+function matEuler(ax, ay, az) {
+  const cx = Math.cos(ax), sx = Math.sin(ax);
+  const cy = Math.cos(ay), sy = Math.sin(ay);
+  const cz = Math.cos(az), sz = Math.sin(az);
+  const Rx = [[1, 0, 0], [0, cx, -sx], [0, sx, cx]];
+  const Ry = [[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]];
+  const Rz = [[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]];
+  return matMul(Rx, matMul(Ry, Rz));
+}
+  </script>
+
+  <script>
+/* ============================================================
+   ESTA ES TU PARTE (Integrante 2)
+   ============================================================ */
+// --- raytracing.js ---
+// raytracing.js  (INTEGRANTE 2)
+//
+// Ray tracing del diario antiguo. Qué hace, en orden:
+//   1. Por cada píxel lanza aa x aa rayos (anti-aliasing por supersampling) y promedia.
+//   2. Cada rayo se prueba contra el diario (cajas giradas) y contra la mesa.
+//   3. En el punto de impacto calcula luz: ambiente + lámpara (con sombra suave)
+//      + luz de relleno + brillo especular.
+//   4. Si quedan rebotes, lanza un rayo reflejado y mezcla el color (Fresnel).
+//   5. Aplica niebla, tonos de cámara y viñeta.
+//
+// opts.aa      -> muestras por eje por píxel (1 = sin AA, 2 = 2x2 = 4 rayos por píxel...)
+// opts.bounces -> rebotes de reflexión (0 = ninguno, 1 = uno, 2 = segundo rebote...)
+// opts.sombras -> rayos de sombra hacia la lámpara (1 = sombra dura, más = sombra suave)
+// opts.rot     -> [rx, ry, rz] giro del diario en radianes (si falta, usa SCENE.diario.rot)
+
+// ---------- Parámetros de apariencia (fáciles de ajustar) ----------
+const RT_STYLE = {
+  exposicion: 1.35,                 // brillo general antes del tono de cámara
+  gamma: 1.18,                     // sube un poco las medias tintas
+  niebla: 0.03,                    // densidad de la niebla con la distancia
+  horizonte: [58, 44, 34],         // color del cielo en el horizonte (también el de la niebla)
+  atenuacion: 0.018,               // cuánto pierde fuerza la lámpara con la distancia
+  vineta: 0.85,                    // intensidad de la viñeta en las esquinas
+};
+
+const RT_EPS = 1e-4;       // distancia mínima para aceptar un impacto (evita auto-intersección)
+const RT_EPS_N = 1e-3;     // cuánto se separa el origen de un rayo secundario de la superficie
+
+// ---------- Utilidades de ruido (para las texturas procedurales) ----------
+
+// Número pseudoaleatorio determinista en [0,1) a partir de dos coordenadas
+function rtHash(x, y) {
+  const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+
+// Ruido de valor suave en 2D (interpola hashes de las 4 esquinas de cada celda)
+function rtRuido(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  let fx = x - ix, fy = y - iy;
+  fx = fx * fx * (3 - 2 * fx);           // curva suave para evitar cuadros visibles
+  fy = fy * fy * (3 - 2 * fy);
+  const a = rtHash(ix, iy), b = rtHash(ix + 1, iy);
+  const c = rtHash(ix, iy + 1), d = rtHash(ix + 1, iy + 1);
+  return (a + (b - a) * fx) + ((c + (d - c) * fx) - (a + (b - a) * fx)) * fy;
+}
+
+// ---------- Textura de la etiqueta (se dibuja con un canvas, solo en el navegador) ----------
+let RT_ETIQUETA = null;   // null = aún no cargada, false = no disponible, objeto = imagen lista
+function rtEtiqueta() {
+  if (RT_ETIQUETA !== null) return RT_ETIQUETA;
+  RT_ETIQUETA = false;
+  if (typeof document === 'undefined') return RT_ETIQUETA;   // fuera del navegador no hay canvas
+  const c = document.createElement('canvas');
+  c.width = 400; c.height = 250;
+  const g = c.getContext('2d');
+  g.fillStyle = '#e3d3a6'; g.fillRect(0, 0, 400, 250);               // papel
+  g.strokeStyle = '#4a3320';
+  g.lineWidth = 4;   g.strokeRect(12, 12, 376, 226);                 // marco doble
+  g.lineWidth = 1.5; g.strokeRect(22, 22, 356, 206);
+  g.fillStyle = '#3a2615'; g.textAlign = 'center';
+  g.font = 'bold 64px Georgia, serif';  g.fillText('DIARIO', 200, 120);
+  g.font = 'italic 28px Georgia, serif'; g.fillText('Cuaderno personal', 200, 165);
+  g.fillRect(110, 185, 180, 2);
+  RT_ETIQUETA = { w: 400, h: 250, data: g.getImageData(0, 0, 400, 250).data };
+  return RT_ETIQUETA;
+}
+
+// ---------- Texturas procedurales ----------
+// Cada textura recibe h (datos del punto de impacto) y el material, y devuelve el color [R,G,B].
+//   h.a, h.b   -> coordenadas locales (en unidades del mundo) sobre la cara golpeada
+//   h.u, h.v   -> las mismas coordenadas normalizadas de 0 a 1 (v hacia abajo)
+//   h.borde    -> distancia al borde más cercano de la cara (para el desgaste)
+//   h.eje, h.signo -> eje de la cara (0=x, 1=y, 2=z) y hacia dónde apunta (+1 / -1)
+//   h.p, h.caja -> punto local y caja golpeada
+const RT_TEXTURAS = {
+  // Cuero: grano fino, rayones y esquinas desgastadas más claras
+  cuero(h, m) {
+    const grano = 0.55 * rtRuido(h.a * 60, h.b * 60) + 0.45 * rtRuido(h.a * 14, h.b * 14);
+    let f = 0.72 + 0.5 * grano;
+    if (rtRuido(h.a * 4, h.b * 110) > 0.86 || rtRuido(h.a * 110, h.b * 4) > 0.88) f += 0.25; // rayones
+    if (h.borde < 0.05) f += (1 - h.borde / 0.05) * 0.55 * rtRuido(h.a * 30, h.b * 30);       // desgaste
+    return [m.color[0] * f, m.color[1] * f, m.color[2] * f];
+  },
+
+  // Latón: pulido con vetas finas en una dirección
+  laton(h, m) {
+    const f = 0.82 + 0.3 * rtRuido(h.a * 3, h.b * 140);
+    return [m.color[0] * f, m.color[1] * f, m.color[2] * f];
+  },
+
+  // Páginas: en los bordes se ven las hojas como rayitas; las tapas planas quedan lisas
+  paginas(h, m) {
+    if (h.eje === 2) return m.color;
+    const periodo = 0.0115;                                        // grosor aproximado de una hoja
+    const s = 0.5 + 0.5 * Math.cos(2 * Math.PI * h.p[2] / periodo);
+    const mancha = rtRuido(h.a * 18, h.b * 18);
+    const dz = Math.min(h.p[2] - h.caja.min[2], h.caja.max[2] - h.p[2]);
+    const sombraTapa = 0.8 + 0.2 * Math.min(1, dz / 0.05);        // oscurece junto a las tapas
+    const f = (1 - 0.3 * s * s - 0.16 * mancha) * sombraTapa;     // papel envejecido
+    return [m.color[0] * f, m.color[1] * f * 0.98, m.color[2] * f * 0.92];
+  },
+
+  // Etiqueta: solo la cara frontal (+z) lleva el dibujo del canvas
+  etiqueta(h, m) {
+    const papel = 0.94 + 0.12 * rtRuido(h.a * 70, h.b * 70);
+    const tex = (h.eje === 2 && h.signo > 0) ? rtEtiqueta() : false;
+    if (!tex) return [m.color[0] * papel, m.color[1] * papel, m.color[2] * papel];
+    const px = Math.min(tex.w - 1, Math.floor(h.u * tex.w));
+    const py = Math.min(tex.h - 1, Math.floor(h.v * tex.h));
+    const i = (py * tex.w + px) * 4;
+    return [tex.data[i] * papel, tex.data[i + 1] * papel, tex.data[i + 2] * papel];
+  },
+
+  // Tela del marcapáginas: trama tejida muy fina
+  tela(h, m) {
+    const f = 0.88 + 0.12 * Math.sin(h.a * 420) * Math.sin(h.b * 420) + 0.08 * rtRuido(h.a * 40, h.b * 40);
+    return [m.color[0] * f, m.color[1] * f, m.color[2] * f];
+  },
+};
+
+// Madera de la mesa: tablas con tono propio, veta ondulada y juntas oscuras
+function rtMadera(p) {
+  const ancho = 1.1;                                   // ancho de cada tabla
+  const idx = Math.floor(p[0] / ancho);
+  const lx = p[0] / ancho - idx;                       // posición 0..1 dentro de la tabla
+  const idz = Math.floor((p[2] + idx * 1.7) / 3.4);    // cortes de tabla a lo largo (desfasados)
+  const lz = (p[2] + idx * 1.7) / 3.4 - idz;
+  const tono = 0.72 + 0.5 * rtHash(idx, idz * 3.1);    // cada tabla es un poco distinta
+  const ondas = rtRuido(p[0] * 2.5, p[2] * 0.5) * 9;   // desvía la veta para que no sea recta
+  const veta = 0.5 + 0.5 * Math.sin(lx * 38 + ondas);
+  const fibra = rtRuido(p[0] * 45, p[2] * 2.2);
+  let f = tono * (0.78 + 0.22 * veta + 0.18 * fibra);
+  if (lx < 0.02 || lx > 0.98 || lz < 0.006 || lz > 0.994) f *= 0.3;   // juntas entre tablas
+  return [96 * f, 64 * f, 40 * f];
+}
+
+// ---------- Preparación de la escena ----------
+
+// Cajas del diario en su sistema local (con material resuelto) y la caja que las envuelve
+const RT_CAJAS = SCENE.diario.cajas.map(b => ({
+  min: [b.c[0] - b.s[0] / 2, b.c[1] - b.s[1] / 2, b.c[2] - b.s[2] / 2],
+  max: [b.c[0] + b.s[0] / 2, b.c[1] + b.s[1] / 2, b.c[2] + b.s[2] / 2],
+  mat: MATERIALES[b.m],
+}));
+// Caja envolvente: si un rayo ni siquiera la toca, se evita probar las 20 cajas
+const RT_BMIN = [0, 1, 2].map(i => Math.min(...RT_CAJAS.map(c => c.min[i])));
+const RT_BMAX = [0, 1, 2].map(i => Math.max(...RT_CAJAS.map(c => c.max[i])));
+
+// Giro actual del diario y números por-render (se llenan en rtPreparar)
+let RT_POSE = null;     // { R, Rt }: matriz de giro y su inversa (la transpuesta)
+let RT_N_SOMBRAS = 6;   // rayos de sombra para los impactos primarios
+let RT_ROT = 0;         // giro aleatorio del patrón de sombras (cambia por subpíxel)
+
+function rtPreparar(rot, sombras) {
+  const R = matEuler(rot[0], rot[1], rot[2]);
+  RT_POSE = { R, Rt: matTrans(R) };
+  RT_N_SOMBRAS = Math.max(1, sombras | 0 || 1);
+}
+
+// ---------- Intersección ----------
+
+// Prueba rayo-caja alineada a los ejes (método de "slabs").
+// Devuelve true si el rayo cruza la caja delante del origen; deja el resultado en
+// RT_TMIN (entrada), RT_TMAX (salida) y RT_EJE (eje de la cara por la que entra).
+let RT_TMIN = 0, RT_TMAX = 0, RT_EJE = 0;
+function rtSlab(o, inv, mn, mx) {
+  let tmin = -Infinity, tmax = Infinity, eje = 0;
+  for (let i = 0; i < 3; i++) {
+    let t1 = (mn[i] - o[i]) * inv[i], t2 = (mx[i] - o[i]) * inv[i];
+    if (t1 > t2) { const tmp = t1; t1 = t2; t2 = tmp; }
+    if (t1 > tmin) { tmin = t1; eje = i; }      // la cara de entrada es la del t más grande
+    if (t2 < tmax) tmax = t2;
+    if (tmin > tmax) return false;
+  }
+  RT_TMIN = tmin; RT_TMAX = tmax; RT_EJE = eje;
+  return tmax > RT_EPS;
+}
+
+// Pasa un rayo del mundo al sistema local del diario. Como el diario solo se gira y se
+// traslada (no se escala), las distancias t son las mismas en ambos sistemas.
+function rtAlocal(o, d) {
+  const oL = matVec(RT_POSE.Rt, sub(o, SCENE.diario.pos));
+  const dL = matVec(RT_POSE.Rt, d);
+  const inv = [1 / (dL[0] || 1e-12), 1 / (dL[1] || 1e-12), 1 / (dL[2] || 1e-12)];
+  return { oL, dL, inv };
+}
+
+// Devuelve el impacto más cercano {t, p, n, color, refl, shin, ks, metal} o null
+function rtIntersecta(o, d) {
+  let tMejor = Infinity, idx = -1, eje = 0;
+  const L = rtAlocal(o, d);
+
+  // 1) Diario: primero la caja envolvente, luego cada caja
+  if (rtSlab(L.oL, L.inv, RT_BMIN, RT_BMAX)) {
+    for (let i = 0; i < RT_CAJAS.length; i++) {
+      const c = RT_CAJAS[i];
+      if (rtSlab(L.oL, L.inv, c.min, c.max) && RT_TMIN > RT_EPS && RT_TMIN < tMejor) {
+        tMejor = RT_TMIN; idx = i; eje = RT_EJE;
+      }
+    }
+  }
+
+  // 2) Mesa: plano horizontal
+  let tMesa = Infinity;
+  if (Math.abs(d[1]) > 1e-9) {
+    const t = (SCENE.mesa.y - o[1]) / d[1];
+    if (t > RT_EPS && t < tMejor) tMesa = t;
+  }
+
+  if (tMesa < Infinity) {
+    const p = add(o, mul(d, tMesa));
+    return { t: tMesa, p, n: [0, 1, 0], color: rtMadera(p), refl: 0.2, shin: 40, ks: 0.22, metal: false };
+  }
+  if (idx < 0) return null;
+
+  // Impacto en el diario: calcular normal, coordenadas de textura y color
+  const c = RT_CAJAS[idx];
+  const pL = add(L.oL, mul(L.dL, tMejor));
+  const nL = [0, 0, 0];
+  nL[eje] = L.dL[eje] > 0 ? -1 : 1;                 // la normal apunta contra el rayo
+  const [ia, ib] = [[2, 1], [0, 2], [0, 1]][eje];   // los dos ejes que quedan sobre la cara
+  const ta = c.max[ia] - c.min[ia], tb = c.max[ib] - c.min[ib];
+  const h = {
+    a: pL[ia], b: pL[ib],
+    u: (pL[ia] - c.min[ia]) / ta,
+    v: 1 - (pL[ib] - c.min[ib]) / tb,
+    borde: Math.min(pL[ia] - c.min[ia], c.max[ia] - pL[ia], pL[ib] - c.min[ib], c.max[ib] - pL[ib]),
+    eje, signo: nL[eje], p: pL, caja: c,
+  };
+  const m = c.mat;
+  return {
+    t: tMejor, p: add(o, mul(d, tMejor)), n: matVec(RT_POSE.R, nL),
+    color: RT_TEXTURAS[m.tex](h, m),
+    refl: m.refl, shin: m.shin, ks: m.ks, metal: !!m.metal,
+  };
+}
+
+// ¿Hay algo entre o y una distancia maxT en la dirección d? (para rayos de sombra)
+// Es más barato que rtIntersecta porque sale en cuanto encuentra cualquier obstáculo.
+function rtOcluido(o, d, maxT) {
+  const L = rtAlocal(o, d);
+  if (rtSlab(L.oL, L.inv, RT_BMIN, RT_BMAX)) {
+    for (let i = 0; i < RT_CAJAS.length; i++) {
+      const c = RT_CAJAS[i];
+      if (rtSlab(L.oL, L.inv, c.min, c.max) && RT_TMIN > RT_EPS && RT_TMIN < maxT) return true;
+    }
+  }
+  if (Math.abs(d[1]) > 1e-9) {
+    const t = (SCENE.mesa.y - o[1]) / d[1];
+    if (t > RT_EPS && t < maxT) return true;
+  }
+  return false;
+}
+
+// ---------- Iluminación ----------
+
+// Fracción de la lámpara que llega al punto p (0 = sombra total, 1 = totalmente iluminado).
+// La lámpara tiene tamaño: se lanzan n rayos a puntos repartidos en su disco y se cuentan
+// los que llegan. Eso produce sombras suaves con penumbra.
+function rtVisibilidad(p, n, nMuestras) {
+  const origen = add(p, mul(n, RT_EPS_N));
+  const lp = SCENE.light.pos;
+  if (nMuestras <= 1) {
+    const v = sub(lp, origen), dist = Math.hypot(v[0], v[1], v[2]);
+    return rtOcluido(origen, mul(v, 1 / dist), dist) ? 0 : 1;
+  }
+  // Base de dos vectores perpendiculares a la dirección de la luz (el disco de la lámpara)
+  const L0 = normalize(sub(lp, p));
+  const t1 = normalize(cross(L0, Math.abs(L0[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0]));
+  const t2 = cross(L0, t1);
+  let libres = 0;
+  for (let k = 0; k < nMuestras; k++) {
+    const r = Math.sqrt((k + 0.5) / nMuestras) * SCENE.light.radius;   // espiral de Fibonacci:
+    const ang = k * 2.39996323 + RT_ROT;                               // reparte puntos parejo
+    const q = add(lp, add(mul(t1, r * Math.cos(ang)), mul(t2, r * Math.sin(ang))));
+    const v = sub(q, origen), dist = Math.hypot(v[0], v[1], v[2]);
+    if (!rtOcluido(origen, mul(v, 1 / dist), dist)) libres++;
+  }
+  return libres / nMuestras;
+}
+
+// Cielo / fondo: degradado del horizonte al color oscuro de arriba
+function rtCielo(d) {
+  const t = Math.pow(Math.max(0, d[1]), 0.5);
+  const hz = RT_STYLE.horizonte, top = SCENE.bg;
+  return [hz[0] + (top[0] - hz[0]) * t, hz[1] + (top[1] - hz[1]) * t, hz[2] + (top[2] - hz[2]) * t];
+}
+
+// Traza un rayo y devuelve su color. depth = rebotes que aún se pueden hacer.
+// primario = true solo para el rayo que sale de la cámara (usa sombra suave completa).
+function rtTrazar(o, d, depth, primario) {
+  const h = rtIntersecta(o, d);
+  if (!h) return rtCielo(d);
+
+  const N = h.n, V = mul(d, -1);
+  const lp = SCENE.light.pos, lc = SCENE.light.color;
+  const aL = sub(lp, h.p), distL = Math.hypot(aL[0], aL[1], aL[2]);
+  const L = mul(aL, 1 / distL);
+
+  // Lámpara: difusa x sombra suave x caída con la distancia
+  const ndl = Math.max(0, dot(N, L));
+  const vis = ndl > 0 ? rtVisibilidad(h.p, N, primario ? RT_N_SOMBRAS : 1) : 0;
+  const fuerza = SCENE.light.intensity * vis / (1 + RT_STYLE.atenuacion * distL * distL);
+  const difusa = ndl * fuerza;
+
+  // Brillo especular de la lámpara (Blinn-Phong)
+  const Hv = normalize(add(L, V));
+  const espec = Math.pow(Math.max(0, dot(N, Hv)), h.shin) * h.ks * fuerza;
+
+  // Luz de relleno (direccional) y ambiente (más fuerte en superficies que miran hacia arriba)
+  const F = SCENE.fill, Ldir = normalize(F.dir);
+  const relleno = F.k * Math.max(0, dot(N, Ldir));
+  const amb = SCENE.ambient.k * (0.65 + 0.35 * N[1]);
+
+  let col = [0, 1, 2].map(i =>
+    h.color[i] * (amb * SCENE.ambient.color[i] / 255 + difusa * lc[i] / 255 + relleno * F.color[i] / 255)
+    + lc[i] * espec
+  );
+
+  // Reflejo: Fresnel de Schlick (más reflejo cuando se mira de lado). Cada nivel de
+  // depth es un rebote extra: con depth = 2 se ve el reflejo de un reflejo.
+  if (depth > 0) {
+    const ndv = Math.max(0, dot(N, V));
+    const k = Math.min(0.75, h.refl + (1 - h.refl) * Math.pow(1 - ndv, 5) * 0.6);
+    if (k > 0.02) {
+      const r = sub(d, mul(N, 2 * dot(d, N)));
+      const rc = rtTrazar(add(h.p, mul(N, RT_EPS_N)), r, depth - 1, false);
+      // En los metales el reflejo se tiñe con el color del material (el latón da reflejos dorados)
+      const tinte = h.metal ? h.color.map(c => c / 255) : [1, 1, 1];
+      col = col.map((c, i) => c * (1 - k) + rc[i] * tinte[i] * k);
+    }
+  }
+
+  // Niebla: mezcla con el color del horizonte según la distancia recorrida
+  const fog = 1 - Math.exp(-h.t * RT_STYLE.niebla);
+  const hz = RT_STYLE.horizonte;
+  return col.map((c, i) => c * (1 - fog) + hz[i] * fog);
+}
+
+// Tono de cámara: evita que los brillos se "quemen" y levanta las medias tintas
+function rtTono(v) {
+  const c = Math.max(0, v) / 255 * RT_STYLE.exposicion;
+  const m = c * (1 + c / 2.25) / (1 + c);              // Reinhard extendido
+  return 255 * Math.pow(Math.min(1, m), 1 / RT_STYLE.gamma);
+}
+
+// ---------- Renderizador principal ----------
+RENDERERS.raytracing = function (ctx, W, H, opts) {
+  opts = opts || {};
+  const aa = Math.max(1, opts.aa | 0 || 1);
+  const bounces = opts.bounces !== undefined ? opts.bounces : 2;
+  rtPreparar(opts.rot || SCENE.diario.rot, opts.sombras !== undefined ? opts.sombras : 6);
+
+  // Cámara "mirar a": base de tres vectores (adelante, derecha, arriba)
+  const cam = SCENE.camera;
+  const adelante = normalize(sub(cam.target, cam.pos));
+  const derecha = normalize(cross(adelante, [0, 1, 0]));
+  const arriba = cross(derecha, adelante);
+  const f = Math.tan((cam.fov * Math.PI / 180) / 2);
+  const aspecto = W / H;
+
+  const img = ctx.createImageData(W, H);
+  const n = aa * aa;
+
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let r = 0, g = 0, b = 0;
+
+    // Supersampling: aa x aa subpíxeles en rejilla regular; se promedian ya con el tono
+    // aplicado para que los bordes contra zonas muy brillantes también salgan suaves
+    for (let sy = 0; sy < aa; sy++) for (let sx = 0; sx < aa; sx++) {
+      const u = (x + (sx + 0.5) / aa) / W;
+      const v = (y + (sy + 0.5) / aa) / H;
+      const dir = normalize(add(adelante,
+        add(mul(derecha, (2 * u - 1) * f * aspecto), mul(arriba, (1 - 2 * v) * f))));
+      RT_ROT = rtHash(x * aa + sx, y * aa + sy) * 6.2831853;   // evita bandas en la penumbra
+      const c = rtTrazar(cam.pos, dir, bounces, true);
+      r += rtTono(c[0]); g += rtTono(c[1]); b += rtTono(c[2]);
+    }
+
+    // Viñeta suave: oscurece las esquinas para dirigir la vista al centro
+    const dx = (x + 0.5) / W - 0.5, dy = (y + 0.5) / H - 0.5;
+    const vig = 1 - RT_STYLE.vineta * (dx * dx + dy * dy);
+
+    img.data.set([r / n * vig, g / n * vig, b / n * vig, 255], (y * W + x) * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+};
+  </script>
+
+  <script>
+/* ============================================================
+   RUNNER DE PRUEBA (no es parte de tu entrega)
+   ============================================================ */
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// Muestra el valor de cada deslizador de giro en grados
+['rx', 'ry', 'rz'].forEach(id => {
+  const el = document.getElementById(id);
+  el.oninput = () => { document.getElementById('v' + id).textContent = el.value + '°'; };
+});
+
+document.getElementById('go').onclick = () => {
+  const tec = document.getElementById('tecnica').value;
+  const res = parseInt(document.getElementById('res').value, 10);
+  const samples = parseInt(document.getElementById('samples').value, 10);
+  const aa = parseInt(document.getElementById('aa').value, 10);
+  const bounces = parseInt(document.getElementById('bounces').value, 10);
+  const sombras = parseInt(document.getElementById('sombras').value, 10);
+  const grados = id => parseFloat(document.getElementById(id).value) * Math.PI / 180;
+  const rot = [grados('rx'), grados('ry'), grados('rz')];
+
+  canvas.width = canvas.height = res;
+  const t0 = performance.now();
+  RENDERERS[tec](ctx, res, res, { samples, aa, bounces, sombras, rot });
+  const ms = (performance.now() - t0).toFixed(1);
+
+  const fila = document.createElement('tr');
+  fila.innerHTML = '<td>' + tec + '</td><td>AA ' + aa + '×' + aa + ', ' + bounces +
+                   ' rebote(s), ' + sombras + ' rayo(s) de sombra</td><td>' + res + '×' + res +
+                   '</td><td>' + ms + '</td>';
+  document.querySelector('#tabla tbody').appendChild(fila);
+};
+
+// Guarda el render como imagen (útil para las capturas del PDF)
+document.getElementById('png').onclick = () => {
+  const a = document.createElement('a');
+  a.download = 'raytracing_diario.png';
+  a.href = canvas.toDataURL('image/png');
+  a.click();
+};
+  </script>
+</body>
+</html>
